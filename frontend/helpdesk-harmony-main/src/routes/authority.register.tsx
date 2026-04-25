@@ -7,7 +7,7 @@ export const Route = createFileRoute("/authority/register")({
   component: AuthorityRegister,
 });
 
-const DEPARTMENTS = ["fire", "water", "electricity", "road"] as const;
+const DEPARTMENTS = ["fire", "water", "electricity", "road", "garbage"] as const;
 
 function AuthorityRegister() {
   const navigate = useNavigate();

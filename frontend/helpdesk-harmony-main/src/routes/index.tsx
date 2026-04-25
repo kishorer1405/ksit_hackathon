@@ -14,7 +14,7 @@ function Home() {
         </h1>
         <p className="mt-4 text-muted-foreground max-w-xl mx-auto">
           File a complaint in seconds. Our AI categorizes, prioritizes, and routes it
-          to the right department — fire, water, electricity, or roads.
+          to the right department — fire, water, electricity, roads, or garbage.
         </p>
       </section>
 
