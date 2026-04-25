@@ -2,6 +2,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState, useCallback } from "react";
 import { api, fileToBase64 } from "../lib/api";
 import { Alert } from "../components/Alert";
+import { LocationHeatmap } from "../components/LocationHeatmap";
 
 export const Route = createFileRoute("/user/dashboard")({
   component: UserDashboard,
@@ -169,6 +170,10 @@ function UserDashboard() {
               )}
             </article>
           ))}
+        </div>
+
+        <div className="mt-6">
+          <LocationHeatmap title="Campus Complaint Heatmap" />
         </div>
       </section>
     </div>

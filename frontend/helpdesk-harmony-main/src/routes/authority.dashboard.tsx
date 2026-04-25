@@ -2,6 +2,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState, useCallback } from "react";
 import { api } from "../lib/api";
 import { Alert } from "../components/Alert";
+import { LocationHeatmap } from "../components/LocationHeatmap";
 
 export const Route = createFileRoute("/authority/dashboard")({
   component: AuthorityDashboard,
@@ -143,6 +144,13 @@ function AuthorityDashboard() {
             </article>
           );
         })}
+      </div>
+
+      <div className="mt-6">
+        <LocationHeatmap
+          title="Department Heatmap Insights"
+          department={department || undefined}
+        />
       </div>
     </div>
   );

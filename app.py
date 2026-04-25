@@ -8,6 +8,7 @@ python app.py
 
 import json
 import os
+import random
 import re
 import sqlite3
 from typing import Any, Dict, Optional
@@ -27,6 +28,27 @@ CORS(app)
 DATABASE_PATH = os.path.join(os.path.dirname(__file__), "complaints.db")
 ALLOWED_STATUSES = {"Pending", "In Process", "Completed", "Rejected"}
 ALLOWED_AUTHORITY_DEPARTMENTS = {"fire", "water", "electricity", "road", "garbage"}
+
+# Bengaluru locality reference points used for the geographic heatmap.
+LOCATION_POINTS = {
+    "Majestic": (12.9762, 77.5710),
+    "Malleswaram": (13.0030, 77.5696),
+    "Rajajinagar": (12.9912, 77.5523),
+    "Yeshwanthpur": (13.0210, 77.5531),
+    "Hebbal": (13.0358, 77.5910),
+    "Indiranagar": (12.9784, 77.6408),
+    "Koramangala": (12.9352, 77.6245),
+    "HSR Layout": (12.9116, 77.6474),
+    "Jayanagar": (12.9250, 77.5938),
+    "BTM Layout": (12.9166, 77.6101),
+    "Electronic City": (12.8459, 77.6600),
+    "Marathahalli": (12.9592, 77.6974),
+    "Bellandur": (12.9295, 77.6787),
+    "Whitefield": (12.9698, 77.7500),
+    "Banashankari": (12.9250, 77.5466),
+    "Basavanagudi": (12.9415, 77.5757),
+    "MG Road": (12.9755, 77.6050),
+}
 
 
 # -----------------------------------------------------------------------------
@@ -81,10 +103,25 @@ def init_db() -> None:
             priority TEXT NOT NULL,
             response TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'Pending',
+            area TEXT,
+            latitude REAL,
+            longitude REAL,
             FOREIGN KEY (user_id) REFERENCES users (id)
         )
         """
     )
+
+    # Lightweight migration for existing databases.
+    existing_columns = {
+        row["name"]
+        for row in cursor.execute("PRAGMA table_info(complaints)").fetchall()
+    }
+    if "area" not in existing_columns:
+        cursor.execute("ALTER TABLE complaints ADD COLUMN area TEXT")
+    if "latitude" not in existing_columns:
+        cursor.execute("ALTER TABLE complaints ADD COLUMN latitude REAL")
+    if "longitude" not in existing_columns:
+        cursor.execute("ALTER TABLE complaints ADD COLUMN longitude REAL")
 
     connection.commit()
     connection.close()
@@ -181,7 +218,23 @@ def fallback_analysis(text: str) -> Dict[str, str]:
             "response": "Technician will be assigned and the issue will be checked soon.",
         }
 
-    if "water" in lower_text:
+    if "fire" in lower_text or "smoke" in lower_text:
+        return {
+            "category": "Fire",
+            "department": "Fire",
+            "priority": "High",
+            "response": "Emergency team will be informed immediately and dispatched.",
+        }
+
+    if "road" in lower_text or "pothole" in lower_text:
+        return {
+            "category": "Road",
+            "department": "Road",
+            "priority": "Medium",
+            "response": "Road maintenance team will inspect and schedule a fix.",
+        }
+
+    if "water" in lower_text or "leakage" in lower_text:
         return {
             "category": "Water",
             "department": "Water",
@@ -203,6 +256,20 @@ def fallback_analysis(text: str) -> Dict[str, str]:
         "priority": "Low",
         "response": "Your complaint has been logged and will be reviewed by the concerned team.",
     }
+
+
+def resolve_location_point(location: str) -> tuple[str, float, float]:
+    text = location.strip().lower()
+
+    if text:
+        for area, (lat, lng) in LOCATION_POINTS.items():
+            if area.lower() in text:
+                return area, lat, lng
+
+    # Default anchor if location is missing or unmatched.
+    default_area = "MG Road"
+    default_lat, default_lng = LOCATION_POINTS[default_area]
+    return default_area, default_lat, default_lng
 
 
 # -----------------------------------------------------------------------------
@@ -481,12 +548,13 @@ def create_complaint():
         return json_error("User not found", 404)
 
     ai_result = analyze_complaint(text)
+    area, latitude, longitude = resolve_location_point(location)
 
     cursor.execute(
         """
         INSERT INTO complaints (
-            user_id, text, location, image, category, department, priority, response, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            user_id, text, location, image, category, department, priority, response, status, area, latitude, longitude
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             user_id,
@@ -498,6 +566,9 @@ def create_complaint():
             ai_result["priority"],
             ai_result["response"],
             "Pending",
+            area,
+            latitude,
+            longitude,
         ),
     )
     connection.commit()
@@ -585,6 +656,206 @@ def update_complaint_status():
     connection.close()
 
     return jsonify({"message": "Status updated successfully", "complaint": row_to_dict(updated_complaint)}), 200
+
+
+# -----------------------------------------------------------------------------
+# Heatmap and insights
+# -----------------------------------------------------------------------------
+@app.get("/insights/heatmap")
+def get_heatmap_data():
+    department = str(request.args.get("department", "")).strip().lower()
+    user_id = request.args.get("user_id")
+    locality_names = list(LOCATION_POINTS.keys())
+    locality_placeholders = ",".join("?" for _ in locality_names)
+
+    query = f"""
+        SELECT
+            area,
+            COALESCE(latitude, 0) AS latitude,
+            COALESCE(longitude, 0) AS longitude,
+            COUNT(*) AS count
+        FROM complaints
+        WHERE area IN ({locality_placeholders})
+    """
+    params: list[Any] = list(locality_names)
+
+    if department:
+        if department not in ALLOWED_AUTHORITY_DEPARTMENTS:
+            return json_error("Invalid department", 400)
+        query += " AND lower(department) = ?"
+        params.append(department)
+
+    if user_id:
+        query += " AND user_id = ?"
+        params.append(user_id)
+
+    query += " GROUP BY area, latitude, longitude ORDER BY count DESC"
+
+    connection = get_db_connection()
+    rows = connection.execute(query, params).fetchall()
+    connection.close()
+
+    points = [
+        {
+            "area": row["area"] or "Unknown",
+            "lat": row["latitude"],
+            "lng": row["longitude"],
+            "weight": row["count"],
+        }
+        for row in rows
+    ]
+
+    return jsonify({"points": points, "total_areas": len(points)}), 200
+
+
+@app.get("/insights/summary")
+def get_insights_summary():
+    department = str(request.args.get("department", "")).strip().lower()
+    user_id = request.args.get("user_id")
+    locality_names = list(LOCATION_POINTS.keys())
+    locality_placeholders = ",".join("?" for _ in locality_names)
+
+    where_parts = [f"area IN ({locality_placeholders})"]
+    params: list[Any] = list(locality_names)
+
+    if department:
+        if department not in ALLOWED_AUTHORITY_DEPARTMENTS:
+            return json_error("Invalid department", 400)
+        where_parts.append("lower(department) = ?")
+        params.append(department)
+
+    if user_id:
+        where_parts.append("user_id = ?")
+        params.append(user_id)
+
+    where_clause = " AND ".join(where_parts)
+
+    connection = get_db_connection()
+    total = connection.execute(
+        f"SELECT COUNT(*) AS c FROM complaints WHERE {where_clause}",
+        params,
+    ).fetchone()["c"]
+
+    top_areas = connection.execute(
+        f"""
+        SELECT area, COUNT(*) AS count
+        FROM complaints
+        WHERE {where_clause}
+        GROUP BY area
+        ORDER BY count DESC
+        LIMIT 5
+        """,
+        params,
+    ).fetchall()
+
+    by_status = connection.execute(
+        f"""
+        SELECT status, COUNT(*) AS count
+        FROM complaints
+        WHERE {where_clause}
+        GROUP BY status
+        ORDER BY count DESC
+        """,
+        params,
+    ).fetchall()
+    connection.close()
+
+    return jsonify(
+        {
+            "total_complaints": total,
+            "top_areas": [{"area": row["area"] or "Unknown", "count": row["count"]} for row in top_areas],
+            "status_breakdown": [{"status": row["status"], "count": row["count"]} for row in by_status],
+        }
+    ), 200
+
+
+@app.post("/seed/demo-complaints")
+def seed_demo_complaints():
+    data = request.get_json(silent=True) or {}
+    count = int(data.get("count", 30))
+    count = max(1, min(count, 200))
+
+    sample_texts = {
+        "Electricity": [
+            "Street lights are not working in Indiranagar.",
+            "Power outage reported in Koramangala apartment block.",
+            "Frequent short-circuit issue near Whitefield commercial street.",
+        ],
+        "Water": [
+            "No water supply reported in Jayanagar apartment lane.",
+            "Water leakage near Bellandur pipeline.",
+            "Drinking water cooler is empty in Malleswaram market area.",
+        ],
+        "Road": [
+            "Large pothole near MG Road service lane.",
+            "Internal road surface damaged in Banashankari.",
+            "Rainwater logging at Marathahalli junction.",
+        ],
+        "Fire": [
+            "Smoke detected near Hebbal market warehouse.",
+            "Fire extinguisher missing in Whitefield office building.",
+            "Burning smell noticed near Koramangala kitchen area.",
+        ],
+        "Garbage": [
+            "Garbage bins are overflowing in HSR Layout.",
+            "Waste not collected from Rajajinagar street.",
+            "Bad smell from dumped garbage behind Yeshwanthpur market.",
+        ],
+    }
+
+    department_choices = ["Electricity", "Water", "Road", "Fire", "Garbage"]
+    statuses = ["Pending", "In Process", "Completed", "Rejected"]
+    area_choices = list(LOCATION_POINTS.keys())
+
+    connection = get_db_connection()
+    cursor = connection.cursor()
+
+    # Create or reuse a dedicated demo user.
+    demo_phone = "9990001111"
+    demo_user = cursor.execute("SELECT id FROM users WHERE phone = ?", (demo_phone,)).fetchone()
+    if demo_user:
+        user_id = demo_user["id"]
+    else:
+        cursor.execute(
+            "INSERT INTO users (name, phone, password) VALUES (?, ?, ?)",
+            ("Demo User", demo_phone, "demo123"),
+        )
+        user_id = cursor.lastrowid
+
+    for _ in range(count):
+        dept = random.choice(department_choices)
+        area = random.choice(area_choices)
+        lat, lng = LOCATION_POINTS[area]
+        text = random.choice(sample_texts[dept])
+        priority = random.choice(["Low", "Medium", "High"])
+        status = random.choice(statuses)
+
+        cursor.execute(
+            """
+            INSERT INTO complaints (
+                user_id, text, location, image, category, department, priority, response, status, area, latitude, longitude
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                text,
+                area,
+                None,
+                dept,
+                dept,
+                priority,
+                "Demo complaint generated for heatmap insights.",
+                status,
+                area,
+                lat,
+                lng,
+            ),
+        )
+
+    connection.commit()
+    connection.close()
+
+    return jsonify({"message": "Demo complaints seeded", "count": count}), 201
 
 
 # -----------------------------------------------------------------------------
